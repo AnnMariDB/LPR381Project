@@ -13,7 +13,6 @@ namespace LPR381ProjectPart1_version2
 {
     public partial class SolverForm : Form
     {
-        //add this field to the SolverForm class
         private LinearProblem currentProblem;
         public SolverForm()
         {
@@ -22,7 +21,6 @@ namespace LPR381ProjectPart1_version2
 
         private void SolverForm_Load(object sender, EventArgs e)
         {
-
         }
 
         private void btnLoadFile_Click(object sender, EventArgs e)
@@ -87,5 +85,11 @@ namespace LPR381ProjectPart1_version2
         {
 
         }
+
+        private void label1_Click(object sender, EventArgs e)
+        {
+
+        }
     }
 }
+

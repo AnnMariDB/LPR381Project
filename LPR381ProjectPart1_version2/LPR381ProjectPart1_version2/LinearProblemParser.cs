@@ -1,7 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
 
 namespace LPR381ProjectPart1_version2
 {
@@ -11,18 +10,15 @@ namespace LPR381ProjectPart1_version2
         {
             var problem = new LinearProblem();
 
-            //detect problem type
             problem.IsMaximization = objective.Trim().ToLower().StartsWith("max");
 
-            //parse objective coefficients
             var objParts = objective.Split(new[] { ' ', ':', ',' }, StringSplitOptions.RemoveEmptyEntries);
             problem.ObjectiveCoeffs = objParts
-                .Skip(1) // skip "max" or "min"
+                .Skip(1)
                 .Where(p => IsNumeric(p))
                 .Select(p => double.Parse(p.TrimStart('+')))
                 .ToList();
 
-            //parse constraints
             List<string> mergedConstraints = new List<string>();
             string pendingLine = null;
 
@@ -30,15 +26,11 @@ namespace LPR381ProjectPart1_version2
             {
                 string line = rawLine.Trim();
                 if (string.IsNullOrWhiteSpace(line)) continue;
-
-                //skip variable type declarations (bin, int, general)
                 if (line.ToLower().StartsWith("bin") || line.ToLower().StartsWith("int") || line.ToLower().StartsWith("general"))
                     continue;
 
-                //normalize operators (<=, >=, =) so they are separate tokens
                 line = NormalizeConstraintLine(line);
 
-                //merge lines if needed
                 if ((line.StartsWith("<=") || line.StartsWith(">=") || line.StartsWith("=")) && pendingLine != null)
                 {
                     mergedConstraints.Add((pendingLine + " " + line).Trim());
@@ -54,11 +46,9 @@ namespace LPR381ProjectPart1_version2
             if (pendingLine != null)
                 mergedConstraints.Add(pendingLine);
 
-            //parse merged constraints into coefficients and RHS
             foreach (var line in mergedConstraints)
             {
                 var parts = line.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
-
                 int opIndex = Array.FindIndex(parts, p => p == "<=" || p == ">=" || p == "=");
                 if (opIndex == -1)
                     throw new Exception("Constraint missing operator (<=, >=, =): " + line);
@@ -74,7 +64,6 @@ namespace LPR381ProjectPart1_version2
                 problem.RHS.Add(rhs);
             }
 
-            //parse binary variables
             var binLine = constraints.FirstOrDefault(l => l.ToLower().StartsWith("bin"));
             if (binLine != null)
             {
@@ -86,7 +75,6 @@ namespace LPR381ProjectPart1_version2
             return problem;
         }
 
-        //helper: split operator from numbers
         private static string NormalizeConstraintLine(string line)
         {
             line = line.Replace(">=", " >= ")
@@ -95,7 +83,6 @@ namespace LPR381ProjectPart1_version2
             return line;
         }
 
-        //helper: check if string is numeric
         private static bool IsNumeric(string s)
         {
             double temp;

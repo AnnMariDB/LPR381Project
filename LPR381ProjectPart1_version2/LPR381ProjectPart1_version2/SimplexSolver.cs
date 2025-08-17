@@ -1,8 +1,5 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.Linq;
 using System.Text;
-using System.Threading.Tasks;
 
 namespace LPR381ProjectPart1_version2
 {
@@ -26,28 +23,27 @@ namespace LPR381ProjectPart1_version2
             int numVars = problem.ObjectiveCoeffs.Count;
             int numConstraints = problem.Constraints.Count;
 
-            //build initial tabel
             double[,] tableau = new double[numConstraints + 1, numVars + numConstraints + 1];
-            int[] basis = new int[numConstraints]; // basic variable indices
+            int[] basis = new int[numConstraints];
 
-            //fill constraints with slack variables
+            //fill constraints and add slack variables
             for (int i = 0; i < numConstraints; i++)
             {
                 for (int j = 0; j < numVars; j++)
                     tableau[i, j] = problem.Constraints[i][j];
 
-                tableau[i, numVars + i] = 1.0; //slack variable
+                tableau[i, numVars + i] = 1.0; // slack variable
                 tableau[i, tableau.GetLength(1) - 1] = problem.RHS[i];
-
                 basis[i] = numVars + i;
             }
 
-            //fill objective row
+            //fill objective row (Z row)
             for (int j = 0; j < numVars; j++)
                 tableau[numConstraints, j] = problem.IsMaximization ? -problem.ObjectiveCoeffs[j] : problem.ObjectiveCoeffs[j];
 
-            sb.AppendLine("\nInitial Tableau:");
-            sb.AppendLine(FormatTableau(tableau, basis));
+            sb.AppendLine("\n----------------------------------------------------");
+            sb.AppendLine("Initial Tableau:");
+            sb.AppendLine(FormatTableau(tableau, basis, "ti"));
 
             int iteration = 0;
 
@@ -70,7 +66,7 @@ namespace LPR381ProjectPart1_version2
                 if (pivotCol == -1)
                 {
                     sb.AppendLine("Optimal solution reached.\n");
-                    break; //all coefficients non-negative
+                    break;
                 }
 
                 //determine leaving variable
@@ -96,13 +92,15 @@ namespace LPR381ProjectPart1_version2
                     return sb.ToString();
                 }
 
-                sb.AppendLine($"\nIteration {iteration}: Pivot column = x{pivotCol + 1}, Pivot row = C{pivotRow + 1}, Min ratio = {minRatio}");
+                string iterLabel = iteration == tableau.GetLength(0) - 1 ? "t*" : "t" + iteration;
+                sb.AppendLine("\n----------------------------------------------------");
+                sb.AppendLine($"Iteration {iteration}: Pivot column = {GetVariableName(pivotCol, numVars)}," +
+                              $" Pivot row = C{pivotRow + 1}, Min ratio = {minRatio}");
 
-                //do pivot
                 Pivot(tableau, pivotRow, pivotCol);
                 basis[pivotRow] = pivotCol;
 
-                sb.AppendLine(FormatTableau(tableau, basis));
+                sb.AppendLine(FormatTableau(tableau, basis, iterLabel));
             }
 
             //extract solution
@@ -114,9 +112,7 @@ namespace LPR381ProjectPart1_version2
             for (int i = 0; i < numVars; i++)
                 sb.AppendLine($"x{i + 1} = {solution[i]}");
 
-            //optimal objective value ---
             double optimalValue = tableau[numConstraints, tableau.GetLength(1) - 1];
-
             sb.AppendLine($"Optimal objective value: {optimalValue}");
 
             return sb.ToString();
@@ -143,38 +139,43 @@ namespace LPR381ProjectPart1_version2
             }
         }
 
-        private string FormatTableau(double[,] tableau, int[] basis)
+        private string FormatTableau(double[,] tableau, int[] basis, string iterationLabel)
         {
             StringBuilder sb = new StringBuilder();
             int rows = tableau.GetLength(0);
             int cols = tableau.GetLength(1);
+            int numVars = cols - rows; //number of original variables
+            int numSlack = rows - 1;
 
             //header
-            sb.Append("Basic\t");
-            for (int j = 0; j < cols - 1; j++)
+            sb.Append(iterationLabel + "\t");
+            for (int j = 0; j < numVars; j++)
                 sb.Append($"x{j + 1}\t");
+            for (int j = 0; j < numSlack; j++)
+                sb.Append($"s{j + 1}\t");
             sb.AppendLine("RHS");
 
-            for (int i = 0; i < rows; i++)
+            //z row first
+            sb.Append("Z\t");
+            for (int j = 0; j < cols; j++)
+                sb.Append($"{Math.Round(tableau[rows - 1, j], 3)}\t");
+            sb.AppendLine();
+
+            //constraint rows
+            for (int i = 0; i < rows - 1; i++)
             {
-                if (i < rows - 1)
-                    sb.Append($"C{i + 1}\t"); // pivot row label as C1, C2, ...
-                else
-                    sb.Append("Z\t");
-
+                sb.Append($"C{i + 1}\t");
                 for (int j = 0; j < cols; j++)
-                {
-                    double displayValue = tableau[i, j];
-                    // show positive Z row for maximization
-                    if (i == rows - 1 && tableau[rows - 1, j] < 0 && problem.IsMaximization)
-                        displayValue = -displayValue;
-
-                    sb.Append($"{Math.Round(displayValue, 3)}\t");
-                }
+                    sb.Append($"{Math.Round(tableau[i, j], 3)}\t");
                 sb.AppendLine();
             }
 
             return sb.ToString();
+        }
+
+        private string GetVariableName(int colIndex, int numOriginalVars)
+        {
+            return colIndex < numOriginalVars ? $"x{colIndex + 1}" : $"s{colIndex - numOriginalVars + 1}";
         }
     }
 }
