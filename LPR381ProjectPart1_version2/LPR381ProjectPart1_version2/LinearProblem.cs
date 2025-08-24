@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 
 namespace LPR381ProjectPart1_version2
@@ -41,6 +42,38 @@ namespace LPR381ProjectPart1_version2
             }
 
             return sb.ToString();
+
         }
+        // LinearProblem.cs  (add inside the class)
+        public LinearProblem Clone()
+        {
+            return new LinearProblem
+            {
+                IsMaximization = this.IsMaximization,
+                ObjectiveCoeffs = new List<double>(this.ObjectiveCoeffs),
+                Constraints = this.Constraints.Select(row => new List<double>(row)).ToList(),
+                RHS = new List<double>(this.RHS),
+                IsBinary = new List<bool>(this.IsBinary)
+            };
+        }
+
+        /// <summary>
+        /// Adds a <= constraint: a·x <= b (slack will be added by the simplex)
+        /// </summary>
+        public void AddLeConstraint(double[] a, double b)
+        {
+            Constraints.Add(new List<double>(a));
+            RHS.Add(b);
+        }
+
+        /// <summary>
+        /// Adds a >= constraint by flipping sign (we store only <= internally)
+        /// </summary>
+        public void AddGeConstraint(double[] a, double b)
+        {
+            var neg = a.Select(v => -v).ToArray();
+            AddLeConstraint(neg, -b);
+        }
+
     }
 }
