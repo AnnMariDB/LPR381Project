@@ -51,6 +51,7 @@
     <Compile Include="CuttingPlaneSolver.cs" />
     <Compile Include="LinearProblem.cs" />
     <Compile Include="LinearProblemParser.cs" />
+    <Compile Include="RevisedSimplexPFI.cs" />
     <Compile Include="SimplexResult.cs" />
     <Compile Include="SimplexSolver.cs" />
     <Compile Include="SolverForm.cs">

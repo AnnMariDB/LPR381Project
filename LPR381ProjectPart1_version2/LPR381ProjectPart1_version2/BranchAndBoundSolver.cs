@@ -11,205 +11,242 @@ namespace LPR381ProjectPart1_version2
 
         private class Node
         {
-            public string Label;        // Node label e.g. "T-1"
-            public LinearProblem P;     // Problem with added branch constraints
+            public LinearProblem P;          // Problem at this node (with branch constraints added)
+            public List<int> Path;           // e.g., [1,2,1] -> "sub_problem 1.2.1"
+            public string FromConstraint;    // Human text of the branching constraint added at this node (for log)
         }
 
         private class Candidate
         {
-            public string Name;         // Candidate name (A, B, C, ...)
-            public string FromNode;     // From which node it was found
-            public double[] X;          // Solution (X values)
-            public double Z;            // Objective value (Z value)
+            public string Name;     // sub_problem label where it was found
+            public double[] X;      // original vars only
+            public double Z;        // objective value
         }
 
         public BranchAndBoundSolver(LinearProblem problem)
         {
-            root = Clone(problem); // Clone the problem
+            // Work on a deep copy to avoid mutating the UI copy
+            root = problem.Clone();
         }
 
         public string Solve(out double[] bestX, out double bestZ)
         {
-            var log = new StringBuilder();
-            bestX = new double[root.ObjectiveCoeffs.Count];
-            bestZ = root.IsMaximization ? double.NegativeInfinity : double.PositiveInfinity;
+            var sb = new StringBuilder();
+            var candidates = new List<Candidate>();
 
-            // Solve the LP relaxation using Simplex
-            var simplex = new SimplexSolver(root);
-            SimplexResult res;
-            double[,] finalTab;
-            int[] finalBasis;
-            string lpLog = simplex.SolveDetailed(out res, out finalTab, out finalBasis);
-            log.Append(lpLog);
-            log.AppendLine();
+            int n = root.ObjectiveCoeffs.Count;
 
-            // Dead-end tests (if the LP relaxation is infeasible, unbounded, or non-optimal)
-            if (!res.IsOptimal || res.IsInfeasible || res.IsUnbounded)
+            // Build an "isIntegral" list aligned to original variables
+            var isIntegral = BuildIntegralMask(root);
+
+            // Incumbent init (depends on max/min)
+            bool isMax = root.IsMaximization;
+            bestX = new double[n];
+            bestZ = isMax ? double.NegativeInfinity : double.PositiveInfinity;
+            bool hasIncumbent = false;
+
+            // DFS stack
+            var stack = new Stack<Node>();
+            stack.Push(new Node
             {
-                log.AppendLine("LP solution is infeasible or unbounded.");
-                bestZ = double.NaN; // Assign a NaN value to indicate no valid solution
-                return log.ToString();
-            }
+                P = root.Clone(),
+                Path = new List<int> { 1 },
+                FromConstraint = "root"
+            });
 
-            log.AppendLine("LP Solution found:");
-            log.AppendLine($"Objective value (z): {res.ObjectiveValue:0.###}");
+            sb.AppendLine("=== Branch & Bound (Simplex) ===");
 
-            // Step 1: Check which x values are not integers and find the first non-integer
-            int fracIndex = -1; // Variable to store the index of the first non-integer x value
-            for (int i = 0; i < res.X.Length; i++)
+            while (stack.Count > 0)
             {
-                if (Math.Abs(res.X[i] - Math.Round(res.X[i])) > 1e-6) // Check if the value is fractional
+                var node = stack.Pop();
+                string label = LabelFromPath(node.Path);
+
+                sb.AppendLine();
+                sb.AppendLine(new string('-', 60));
+                sb.AppendLine($"{label}  (added: {node.FromConstraint})");
+
+                // Solve this node’s LP relaxation
+                var simplex = new SimplexSolver(node.P);
+                SimplexResult res;
+                double[,] finalTab;
+                int[] finalBasis;
+                simplex.SolveDetailed(out res, out finalTab, out finalBasis);
+
+                // Show the node’s final optimal tableau (or last tableau on early exit)
+                if (res.FinalTableau != null && res.FinalTableau.Length > 0 && res.FinalBasis != null && res.FinalBasis.Length > 0)
                 {
-                    fracIndex = i;
-                    break; // Exit after finding the first fractional value
+                    sb.AppendLine("Final tableau for this sub-problem:");
+                    sb.AppendLine(SimplexSolver.RenderTableau(res.FinalTableau, res.FinalBasis, label));
                 }
+
+                // Prune: infeasible or unbounded or not optimal
+                if (res.IsInfeasible || res.IsUnbounded || !res.IsOptimal)
+                {
+                    if (res.IsInfeasible) sb.AppendLine("→ Pruned (infeasible).");
+                    else if (res.IsUnbounded) sb.AppendLine("→ Pruned (unbounded).");
+                    else sb.AppendLine("→ Pruned (no optimal solution at this node).");
+                    continue;
+                }
+
+                // Extract original vars only (your Simplex returns x + slacks)
+                var xFull = res.X ?? Array.Empty<double>();
+                var x = new double[n];
+                for (int i = 0; i < n && i < xFull.Length; i++) x[i] = xFull[i];
+                double z = res.ObjectiveValue;
+
+                // If integer-feasible on flagged vars → record candidate + update incumbent
+                if (IsIntegerFeasible(x, isIntegral))
+                {
+                    sb.AppendLine("→ Integer feasible on flagged variables.");
+                    candidates.Add(new Candidate { Name = label, X = x.ToArray(), Z = z });
+
+                    if (!hasIncumbent ||
+                        (isMax && z > bestZ + 1e-12) ||
+                        (!isMax && z < bestZ - 1e-12))
+                    {
+                        hasIncumbent = true;
+                        bestZ = z;
+                        Array.Copy(x, bestX, n);
+                        sb.AppendLine($"→ New incumbent: z = {bestZ:0.###}");
+                    }
+                    continue;
+                }
+
+                // Otherwise branch
+                int k = BranchingRules.PickBranchVariable(x, isIntegral);
+                if (k < 0)
+                {
+                    // No fractional on flagged vars, treat as candidate (covers all-continuous models too)
+                    sb.AppendLine("→ No fractional flagged variable found; accepting as candidate.");
+                    candidates.Add(new Candidate { Name = label, X = x.ToArray(), Z = z });
+                    if (!hasIncumbent ||
+                        (isMax && z > bestZ + 1e-12) ||
+                        (!isMax && z < bestZ - 1e-12))
+                    {
+                        hasIncumbent = true;
+                        bestZ = z;
+                        Array.Copy(x, bestX, n);
+                        sb.AppendLine($"→ New incumbent: z = {bestZ:0.###}");
+                    }
+                    continue;
+                }
+
+                double xi = x[k];
+                double floor = Math.Floor(xi);
+                double ceil = Math.Ceiling(xi);
+
+                sb.AppendLine($"Branching on x{k + 1} = {xi:0.###} → "
+                            + $"left: x{k + 1} ≤ {floor}, right: x{k + 1} ≥ {ceil}");
+
+                // Left child: x_k <= floor
+                var left = node.P.Clone();
+                var aLeft = new double[n];
+                aLeft[k] = 1.0;
+                left.AddLeConstraint(aLeft, floor);
+
+                // Right child: x_k >= ceil
+                var right = node.P.Clone();
+                var aRight = new double[n];
+                aRight[k] = 1.0;
+                right.AddGeConstraint(aRight, ceil);
+
+                // Order of push controls DFS order. Push right first so left is popped next.
+                var rightNode = new Node
+                {
+                    P = right,
+                    Path = node.Path.Concat(new[] { 2 }).ToList(),
+                    FromConstraint = $"x{k + 1} ≥ {ceil}"
+                };
+                var leftNode = new Node
+                {
+                    P = left,
+                    Path = node.Path.Concat(new[] { 1 }).ToList(),
+                    FromConstraint = $"x{k + 1} ≤ {floor}"
+                };
+
+                stack.Push(rightNode);
+                stack.Push(leftNode);
             }
 
-            if (fracIndex < 0)
+            // Summary
+            sb.AppendLine();
+            sb.AppendLine(new string('=', 60));
+            sb.AppendLine("Candidates found (integer-feasible):");
+            if (candidates.Count == 0)
             {
-                log.AppendLine("All x values are integers. No branching needed.");
-                bestZ = res.ObjectiveValue; // Since the solution is integer-feasible, set the bestZ
+                sb.AppendLine("  (none)");
             }
             else
             {
-                log.AppendLine($"First non-integer x value found at index {fracIndex + 1}: x{fracIndex + 1} = {res.X[fracIndex]:0.###}");
+                // Sort for a tidy list (Max: desc z; Min: asc z)
+                var ordered = root.IsMaximization
+                    ? candidates.OrderByDescending(c => c.Z)
+                    : candidates.OrderBy(c => c.Z);
 
-                // Now, subtract the constraints for branching
-
-                // Target row to subtract from (C2 in your example)
-                int targetConstraintIndex = 1; // Index of the constraint row we are working with (C2)
-
-                // Assuming we want to work with the second constraint, use its row:
-                double[] targetConstraint = new double[finalTab.GetLength(1)];
-                for (int i = 0; i < finalTab.GetLength(1); i++)
+                int idx = 1;
+                foreach (var c in ordered)
                 {
-                    targetConstraint[i] = finalTab[targetConstraintIndex, i]; // Copy C2's row
+                    sb.AppendLine($"  {idx}. {c.Name}: z = {c.Z:0.###}, " +
+                                  $"x = [{string.Join(", ", c.X.Select(v => v.ToString("0.###")))}]");
+                    idx++;
                 }
-
-                // Create the new constraint row (C3) for the branching variable (x1, for example)
-                double[] newConstraintRow = new double[finalTab.GetLength(1)];
-
-                // For the new constraint, set the value for x1 as 1, and other slack variables correctly
-                newConstraintRow[fracIndex] = 1;  // x1
-                newConstraintRow[finalTab.GetLength(1) - 1] = 3;  // RHS of the new constraint (s3)
-
-                // Now, subtract the target constraint (C2) from the new constraint row (C3)
-                for (int i = 0; i < finalTab.GetLength(1) - 1; i++)  // Loop through all columns except RHS
-                {
-                    newConstraintRow[i] -= targetConstraint[i];  // Subtract element-wise
-                }
-
-                // Subtract the RHS (right-hand side) values for the constraints
-                double newRHS = 3 - finalTab[targetConstraintIndex, finalTab.GetLength(1) - 1];
-
-                // Now multiply the resulting new constraint by -1 (after the subtraction)
-                for (int i = 0; i < finalTab.GetLength(1) - 1; i++)  // Do this for all variables (slack variables)
-                {
-                    newConstraintRow[i] *= -1;
-                }
-
-                // Update the new RHS after multiplying by -1
-                newRHS *= -1;
-
-                // Log the new constraint after subtraction
-                log.AppendLine($"New 3rd constraint added after subtraction: ");
-                string newConstraintStr = "";
-                for (int i = 0; i < finalTab.GetLength(1) - 1; i++)
-                {
-                    if (i < finalTab.GetLength(1) - 2) // Avoid the last column (RHS)
-                        newConstraintStr += $"{newConstraintRow[i]:0.###}s{i + 1} ";  // Change x variables to s (slack variables)
-                }
-                log.AppendLine($"Constraint: {newConstraintStr} <= {newRHS:0.###}");
-
-                // Continue with branching logic and subproblem creation (not shown here)
             }
 
-            return log.ToString(); // Return the log of what has been done so far
+            if (hasIncumbent)
+            {
+                sb.AppendLine();
+                sb.AppendLine("Best incumbent:");
+                for (int i = 0; i < n; i++)
+                    sb.AppendLine($"x{i + 1} = {bestX[i]:0.###}");
+                sb.AppendLine($"z = {bestZ:0.###}");
+            }
+            else
+            {
+                sb.AppendLine();
+                sb.AppendLine("No integer-feasible solution found.");
+                bestZ = double.NaN;
+            }
+
+            return sb.ToString();
         }
 
         // ---------------- helpers ----------------
-        public string CalculateOptimalSolution(double[,] tableau, double[] rhsValues, out double[] bestX, out double bestZ)
+
+        private static string LabelFromPath(List<int> path)
         {
-            var log = new StringBuilder();
-            bestX = new double[tableau.GetLength(1) - 1];
-            bestZ = double.NaN;
-
-            // Step 1: Solve the table using Simplex
-            var simplex = new SimplexSolver(tableau, rhsValues); //Error('SimplexSolver' does not contain a constructor that takes 2 arguments)
-            SimplexResult res;
-            string simplexLog = simplex.Solve(out res);//Error(No overload for method 'Solve' takes 1 arguments)
-            log.Append(simplexLog);
-
-            // Step 2: Check if optimal solution is found
-            if (!res.IsOptimal || res.IsInfeasible || res.IsUnbounded)
-            {
-                log.AppendLine("Solution is infeasible, unbounded, or non-optimal.");
-                bestZ = double.NaN;
-                return log.ToString();
-            }
-
-            // Log the optimal solution
-            log.AppendLine("Optimal Solution Found:");
-            log.AppendLine($"Objective Value: {res.ObjectiveValue:0.###}");
-
-            // Step 3: Check integer feasibility
-            bool isIntegerFeasible = true;
-            for (int i = 0; i < res.X.Length; i++)
-            {
-                if (Math.Abs(res.X[i] - Math.Round(res.X[i])) > 1e-6) // Check if it's fractional
-                {
-                    isIntegerFeasible = false;
-                    break;
-                }
-            }
-
-            if (isIntegerFeasible)
-            {
-                log.AppendLine("Solution is integer feasible.");
-                bestZ = res.ObjectiveValue;
-                Array.Copy(res.X, bestX, res.X.Length);
-            }
-            else
-            {
-                log.AppendLine("Solution is not integer feasible, further subproblems needed.");
-                bestZ = res.ObjectiveValue;
-
-                // Proceed to subproblems for branching
-                log.AppendLine("Creating further subproblems...");
-                int fracIndex = -1;
-                for (int i = 0; i < res.X.Length; i++)
-                {
-                    if (Math.Abs(res.X[i] - Math.Round(res.X[i])) > 1e-6)
-                    {
-                        fracIndex = i;
-                        break;
-                    }
-                }
-
-                if (fracIndex >= 0)
-                {
-                    log.AppendLine($"Branching on variable {fracIndex + 1}: {res.X[fracIndex]:0.###}");
-                    log.AppendLine($"Subproblem 1: x{fracIndex + 1} <= {Math.Floor(res.X[fracIndex])}");
-                    log.AppendLine($"Subproblem 2: x{fracIndex + 1} >= {Math.Ceiling(res.X[fracIndex])}");
-                }
-            }
-
-            return log.ToString(); // Return the log with results and subproblem info
+            return "sub_problem " + string.Join(".", path);
         }
 
-
-        private static LinearProblem Clone(LinearProblem p)
+        private static List<bool> BuildIntegralMask(LinearProblem p)
         {
-            var q = new LinearProblem
+            int n = p.ObjectiveCoeffs.Count;
+            var mask = new List<bool>(Enumerable.Repeat(false, n));
+
+            // If IsBinary is empty → assume all original variables are integral (common in IPs)
+            if (p.IsBinary == null || p.IsBinary.Count == 0)
             {
-                IsMaximization = p.IsMaximization,
-                ObjectiveCoeffs = p.ObjectiveCoeffs.ToList(),
-                RHS = p.RHS.ToList(),
-                IsBinary = p.IsBinary.ToList()
-            };
-            foreach (var row in p.Constraints)
-                q.Constraints.Add(row.ToList());
-            return q;
+                for (int i = 0; i < n; i++) mask[i] = true;
+                return mask;
+            }
+
+            // If provided, pad/trim to n and use it directly
+            int m = Math.Min(n, p.IsBinary.Count);
+            for (int i = 0; i < m; i++)
+                mask[i] = p.IsBinary[i];
+
+            // Any missing flags beyond provided length stay false (continuous)
+            return mask;
+        }
+
+        private static bool IsIntegerFeasible(double[] x, List<bool> isIntegral, double eps = 1e-6)
+        {
+            int n = Math.Min(x.Length, isIntegral.Count);
+            for (int i = 0; i < n; i++)
+            {
+                if (!isIntegral[i]) continue;
+                if (Math.Abs(x[i] - Math.Round(x[i])) > eps) return false;
+            }
+            return true;
         }
     }
 }

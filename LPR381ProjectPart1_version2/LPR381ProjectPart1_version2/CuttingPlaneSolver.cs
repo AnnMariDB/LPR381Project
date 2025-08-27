@@ -6,124 +6,176 @@ using System.Text;
 namespace LPR381ProjectPart1_version2
 {
     /// <summary>
-    /// Very light Gomory-style Cutting Plane loop that keeps using your SimplexSolver.
-    /// Notes:
-    /// - Written for C# 7.3 (no nullable reference types).
-    /// - Uses a simple (safe) cut for the first fractional binary variable:  x_i <= floor(x_i).
-    ///   This compiles and integrates cleanly with your LinearProblem (<= handled by slack).
-    /// - If you later expose tableau/basis from SimplexSolver, you can replace BuildCut(...)
-    ///   with a real Gomory fractional cut from a fractional row.
+    /// Cutting Plane using Gomory fractional cuts, with a Revised Simplex (PFI) core and price-out.
+    /// - Selects the most-fractional BASIC integer row (fractional RHS).
+    /// - Slack-space cut: α·s ≥ f, α = frac(row_i(B^{-1})) (handles negatives).
+    /// - Convert via s = b − A x ⇒ (αA)x ≤ αb − f.
+    /// - Before adding: verifies the cut violates the current solution and is not a duplicate.
+    /// - Warm-starts PFI and repeats until integer or no eligible row.
     /// </summary>
     public class CuttingPlaneSolver
     {
         private readonly LinearProblem problem;
-        private const int DefaultMaxCuts = 10;
-        private const double Eps = 1e-6;
+        private const int DefaultMaxCuts = 25;
 
         public CuttingPlaneSolver(LinearProblem problem)
         {
             this.problem = problem;
         }
 
-        /// <summary>
-        /// Runs LP relaxation, then iteratively adds simple cuts until all flagged-binary vars are integer or maxCuts reached.
-        /// Returns a human-readable log, and outputs the incumbent vector and objective value.
-        /// </summary>
         public string Solve(out double[] bestX, out double bestZ)
         {
             var sb = new StringBuilder();
-            bestX = new double[0];
+            bestX = Array.Empty<double>();
             bestZ = double.NaN;
 
-            sb.AppendLine("=== Cutting Plane Algorithm (Gomory-style, simplified) ===");
+            var isInt = BuildIntegralMask(problem);
 
-            // Work on a deep copy so the original LinearProblem isn't mutated from the UI.
-            var work = Clone(problem);
+            sb.AppendLine("=== Cutting Plane (Gomory Fractional) with PFI + Price-Out ===");
 
-            // 1) Relax integrality (we already use LP Simplex)
-            var simplex = new SimplexSolver(work);
-            string lpResult = simplex.Solve();
-            sb.AppendLine("Initial LP Relaxation:");
-            sb.AppendLine(lpResult);
+            // IMPORTANT: Create ONE PFI and REUSE IT (do NOT re-create inside the loop)
+            var pfi = new RevisedSimplexPFI(problem);
 
-            // Try to recover the last solution Simplex found using the helper we add below
-            // If you have a richer SimplexResult already, you can swap this out to read it directly.
-            double[] x = ExtractSolutionFromLog(lpResult, work.ObjectiveCoeffs.Count);
-            double z = ExtractObjectiveFromLog(lpResult);
-
-            if (x.Length == work.ObjectiveCoeffs.Count)
+            // Initial solve
+            sb.AppendLine("---- PFI: Initial LP relaxation ----");
             {
-                if (IsIntegerVector(x, work.IsBinary))
+                var pfiLog = pfi.Optimize(out var x0, out var z0);
+                sb.AppendLine(pfiLog);
+                if (AllFlaggedIntegersIntegral(x0, isInt))
                 {
-                    bestX = x;
-                    bestZ = z;
-                    sb.AppendLine("LP relaxation is already integer-feasible for flagged binaries. Done.");
-                    LogSolution(sb, bestX, bestZ);
+                    bestX = x0;
+                    bestZ = z0;
+                    sb.AppendLine("Already integer on flagged variables.");
                     return sb.ToString();
                 }
             }
 
-            int addedCuts = 0;
-            while (addedCuts < DefaultMaxCuts)
+            int cuts = 0;
+            while (cuts < DefaultMaxCuts)
             {
-                // Re-solve current LP
-                simplex = new SimplexSolver(work);
-                lpResult = simplex.Solve();
+                // Current basic values and basis (NO extra solve here)
+                var xb = pfi.ComputeXB();
+                int m = pfi.Rows;
+                int n = pfi.Cols;
+                int[] Bidx = pfi.Basis;
+
+                // Build current x for original vars
+                double[] xCurr = new double[n];
+                for (int i = 0; i < m; i++)
+                {
+                    int col = Bidx[i];
+                    if (col < n) xCurr[col] = xb[i];
+                }
+
+                // Most-fractional BASIC integer row
+                int chosenRow = -1;
+                double f = 0.0;
+                string basicName = "";
+                double bestScore = -1.0; // closeness to 0.5
+
+                for (int i = 0; i < m; i++)
+                {
+                    int col = Bidx[i];
+                    if (col < n && col < isInt.Count && isInt[col])
+                    {
+                        double bi = xb[i];
+                        double fi = Frac(bi);
+                        if (fi > 1e-8 && fi < 1 - 1e-8)
+                        {
+                            double score = 0.5 - Math.Abs(fi - 0.5);
+                            if (score > bestScore)
+                            {
+                                bestScore = score;
+                                chosenRow = i; f = fi; basicName = $"x{col + 1}";
+                            }
+                        }
+                    }
+                }
+
+                if (chosenRow < 0)
+                {
+                    sb.AppendLine("No eligible fractional basic-integer row found. Stopping.");
+                    break;
+                }
+
+                // α = frac(row_i(B^{-1})) via B^{-T} e_i
+                var alphaRow = pfi.GetBinvRow(chosenRow);
+                for (int j = 0; j < alphaRow.Length; j++)
+                {
+                    double v = alphaRow[j];
+                    double fr = v - Math.Floor(v);
+                    if (fr < 0) fr += 1.0;
+                    alphaRow[j] = fr;
+                }
+
+                // Convert α·s ≥ f with s = b − A x  =>  (αA)x ≤ αb − f
+                var A = problem.Constraints;
+                var b = problem.RHS;
+
+                double[] aCut = new double[n];     // (αA)
+                for (int j = 0; j < n; j++)
+                {
+                    double sum = 0.0;
+                    for (int r = 0; r < m; r++) sum += alphaRow[r] * A[r][j];
+                    aCut[j] = sum;
+                }
+
+                double rhs = 0.0;                  // αb − f
+                for (int r = 0; r < m; r++) rhs += alphaRow[r] * b[r];
+                rhs -= f;
+
+                // Violation check (NO solve): must be strictly violated at xCurr
+                double lhs = 0.0;
+                for (int j = 0; j < n; j++) lhs += aCut[j] * xCurr[j];
+
+                if (lhs <= rhs + 1e-8)
+                {
+                    sb.AppendLine();
+                    sb.AppendLine($"Candidate cut from row C{chosenRow + 1} does not violate current solution (lhs={lhs:0.###} ≤ rhs={rhs:0.###}).");
+                    sb.AppendLine("Stopping to avoid adding a non-cutting constraint.");
+                    break;
+                }
+
+                // Duplicate guard
+                if (IsDuplicate(problem.Constraints, problem.RHS, aCut, rhs))
+                {
+                    sb.AppendLine();
+                    sb.AppendLine("New cut duplicates an existing row → stopping.");
+                    break;
+                }
+
+                // Log both forms
+                cuts++;
                 sb.AppendLine();
-                sb.AppendLine($"--- Re-solve after {addedCuts} cut(s) ---");
-                sb.AppendLine(lpResult);
+                sb.AppendLine($"--- Gomory Cut #{cuts} from row C{chosenRow + 1} (basic {basicName}) ---");
+                sb.AppendLine(RenderSlackCut(alphaRow, f));
+                sb.AppendLine(RenderXCut(aCut, rhs));
 
-                x = ExtractSolutionFromLog(lpResult, work.ObjectiveCoeffs.Count);
-                z = ExtractObjectiveFromLog(lpResult);
+                // ADD CUT, then WARM-START, then OPTIMIZE  (this order matters!)
+                problem.Constraints.Add(aCut.ToList());
+                problem.RHS.Add(rhs);
+                pfi.AddRowAndWarmStart(aCut, rhs);
 
-                if (x.Length != work.ObjectiveCoeffs.Count)
+                sb.AppendLine($"---- PFI: After cut #{cuts} ----");
+                var pfiLog2 = pfi.Optimize(out var xk, out var zk);
+                sb.AppendLine(pfiLog2);
+
+                if (AllFlaggedIntegersIntegral(xk, isInt))
                 {
-                    sb.AppendLine("Could not parse a complete primal solution from Simplex log; stopping.");
-                    break;
-                }
-
-                // If solution is integer on binary vars -> we’re done
-                if (IsIntegerVector(x, work.IsBinary))
-                {
-                    bestX = x;
-                    bestZ = z;
-                    sb.AppendLine("All flagged-binary variables are integer. Cutting Plane finished.");
-                    LogSolution(sb, bestX, bestZ);
+                    bestX = xk;
+                    bestZ = zk;
+                    sb.AppendLine("All flagged integer variables integral. Done.");
                     return sb.ToString();
                 }
-
-                // Build a simple cut: for first fractional binary xi, add xi <= floor(xi)
-                List<double> coeffs;
-                double rhs;
-                if (!BuildSimpleBinaryCut(x, work.IsBinary, out coeffs, out rhs))
-                {
-                    // No fractional binary found (maybe only continuous vars remain fractional)
-                    sb.AppendLine("No fractional flagged-binary variables found; stopping.");
-                    break;
-                }
-
-                work.Constraints.Add(coeffs);
-                work.RHS.Add(rhs);
-                addedCuts++;
-
-                sb.AppendLine($"Added cut #{addedCuts}:");
-                sb.AppendLine(RenderCut(coeffs, rhs));
             }
 
-            // One final solve and return what we have
-            simplex = new SimplexSolver(work);
-            lpResult = simplex.Solve();
-            sb.AppendLine();
-            sb.AppendLine($"Reached max cuts ({DefaultMaxCuts}) or stopping condition. Returning current solution.");
-            sb.AppendLine(lpResult);
-
-            x = ExtractSolutionFromLog(lpResult, work.ObjectiveCoeffs.Count);
-            z = ExtractObjectiveFromLog(lpResult);
-            if (x.Length == work.ObjectiveCoeffs.Count)
+            // Final (may be fractional)
             {
-                bestX = x;
-                bestZ = z;
-                LogSolution(sb, bestX, bestZ);
+                var pfiLog = pfi.Optimize(out var xend, out var zend);
+                sb.AppendLine(pfiLog);
+                bestX = xend;
+                bestZ = zend;
+                sb.AppendLine($"Stopped after {cuts} cut(s). Returning current solution (may be fractional).");
             }
 
             return sb.ToString();
@@ -131,144 +183,84 @@ namespace LPR381ProjectPart1_version2
 
         // ---------------- helpers ----------------
 
-        private static LinearProblem Clone(LinearProblem p)
+        private static List<bool> BuildIntegralMask(LinearProblem p)
         {
-            var copy = new LinearProblem
+            int n = p.ObjectiveCoeffs.Count;
+            var mask = new List<bool>(Enumerable.Repeat(false, n));
+            if (p.IsBinary == null || p.IsBinary.Count == 0)
             {
-                IsMaximization = p.IsMaximization
-            };
-            copy.ObjectiveCoeffs.AddRange(p.ObjectiveCoeffs);
-            foreach (var row in p.Constraints)
-                copy.Constraints.Add(new List<double>(row));
-            copy.RHS.AddRange(p.RHS);
-            copy.IsBinary.AddRange(p.IsBinary);
-            return copy;
+                for (int i = 0; i < n; i++) mask[i] = true; // default: all integer
+                return mask;
+            }
+            int m = Math.Min(n, p.IsBinary.Count);
+            for (int i = 0; i < m; i++) mask[i] = p.IsBinary[i];
+            return mask;
         }
 
-        private static bool IsIntegerVector(double[] x, List<bool> isBinaryFlags)
+        private static bool AllFlaggedIntegersIntegral(double[] x, List<bool> isInt, double eps = 1e-6)
         {
-            if (x == null || isBinaryFlags == null) return false;
-            int n = Math.Min(x.Length, isBinaryFlags.Count);
+            int n = Math.Min(x.Length, isInt.Count);
             for (int i = 0; i < n; i++)
             {
-                if (isBinaryFlags[i])
-                {
-                    if (Math.Abs(x[i] - Math.Round(x[i])) > Eps)
-                        return false;
-                    // if strictly binary, you can also enforce 0/1 here if you like:
-                    // if (Math.Round(x[i]) != 0 && Math.Round(x[i]) != 1) return false;
-                }
+                if (!isInt[i]) continue;
+                if (Math.Abs(x[i] - Math.Round(x[i])) > eps) return false;
             }
             return true;
         }
 
-        /// <summary>
-        /// Very simple cut: pick first fractional flagged-binary xi and add  xi <= floor(xi).
-        /// Returns false if none found.
-        /// </summary>
-        private static bool BuildSimpleBinaryCut(double[] x, List<bool> isBinaryFlags, out List<double> coeffs, out double rhs)
+        private static bool IsDuplicate(List<List<double>> A, List<double> B, double[] aNew, double bNew, double tol = 1e-8)
         {
-            coeffs = new List<double>();
-            rhs = 0;
-
-            int n = isBinaryFlags == null ? 0 : isBinaryFlags.Count;
-            if (x == null || x.Length == 0 || n == 0) return false;
-
-            int m = Math.Max(n, x.Length); // constraint vector must match number of decision vars
-            for (int i = 0; i < n; i++)
+            for (int i = 0; i < A.Count; i++)
             {
-                if (!isBinaryFlags[i]) continue;
-
-                double frac = x[i] - Math.Floor(x[i]);
-                if (frac > Eps && (1.0 - frac) > Eps)
+                if (Math.Abs(B[i] - bNew) > tol) continue;
+                bool same = true;
+                for (int j = 0; j < aNew.Length; j++)
                 {
-                    // create xi <= floor(xi)
-                    coeffs = Enumerable.Repeat(0.0, m).ToList();
-                    coeffs[i] = 1.0;
-                    rhs = Math.Floor(x[i]);
-                    return true;
+                    if (Math.Abs(A[i][j] - aNew[j]) > tol) { same = false; break; }
                 }
+                if (same) return true;
             }
-
             return false;
         }
 
-        private static string RenderCut(List<double> coeffs, double rhs)
+        private static double Frac(double v)
+        {
+            double f = v - Math.Floor(v);
+            if (f < 0) f += 1.0;
+            return f;
+        }
+
+        private static string RenderSlackCut(double[] alpha, double f)
+        {
+            // α·s ≥ f   (equivalently  −α·s ≤ −f)
+            string Join(double sign = +1.0)
+            {
+                var parts = new List<string>();
+                for (int j = 0; j < alpha.Length; j++)
+                {
+                    double c = sign * alpha[j];
+                    if (Math.Abs(c) < 1e-12) continue;
+                    string term = $"{Math.Abs(c):0.###}s{j + 1}";
+                    parts.Add(c >= 0 ? term : "− " + term);
+                }
+                if (parts.Count == 0) return "0";
+                return parts[0] + string.Concat(parts.Skip(1).Select(p => " + " + p));
+            }
+            var ge = Join(+1);
+            var le = Join(-1);
+            return $"Slack-space cut:   {ge} ≥ {f:0.###}   (equivalently  {le} ≤ {(-f):0.###})";
+        }
+
+        private static string RenderXCut(double[] coeffs, double rhs)
         {
             var parts = new List<string>();
-            for (int j = 0; j < coeffs.Count; j++)
+            for (int j = 0; j < coeffs.Length; j++)
             {
                 if (Math.Abs(coeffs[j]) < 1e-12) continue;
                 parts.Add($"{coeffs[j]:0.###}x{j + 1}");
             }
             var left = parts.Count == 0 ? "0" : string.Join(" + ", parts);
-            return $"    {left} <= {rhs:0.###}";
-        }
-
-        private static void LogSolution(StringBuilder sb, double[] x, double z)
-        {
-            sb.AppendLine();
-            sb.AppendLine("Incumbent solution:");
-            for (int i = 0; i < x.Length; i++)
-                sb.AppendLine($"x{i + 1} = {x[i]:0.###}");
-            sb.AppendLine($"z = {z:0.###}");
-        }
-
-        // --- Minimal parsers so we can read your current Simplex output without changing SimplexSolver ---
-
-        private static double[] ExtractSolutionFromLog(string log, int n)
-        {
-            // Looks for lines like "x1 = 1.234"
-            var x = new double[n];
-            if (string.IsNullOrEmpty(log)) return new double[0];
-
-            var lines = log.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-            int filled = 0;
-            foreach (var line in lines)
-            {
-                // crude parse
-                // example: "x3 = 0.75"
-                var trimmed = line.Trim();
-                if (!trimmed.StartsWith("x")) continue;
-                var eq = trimmed.IndexOf('=');
-                if (eq < 0) continue;
-
-                var name = trimmed.Substring(0, Math.Max(0, trimmed.IndexOf(' '))).Trim();
-                if (!name.StartsWith("x")) continue;
-
-                int index;
-                if (!int.TryParse(name.Substring(1), out index)) continue;
-                if (index < 1 || index > n) continue;
-
-                double val;
-                if (!double.TryParse(trimmed.Substring(eq + 1).Trim(), out val)) continue;
-
-                x[index - 1] = val;
-                filled++;
-            }
-
-            return filled == n ? x : new double[0];
-        }
-
-        private static double ExtractObjectiveFromLog(string log)
-        {
-            // Looks for a line like "Optimal objective value: <number>"
-            if (string.IsNullOrEmpty(log)) return double.NaN;
-
-            var lines = log.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-            foreach (var line in lines)
-            {
-                var t = line.Trim();
-                var key = "Optimal objective value:";
-                if (t.StartsWith(key, StringComparison.OrdinalIgnoreCase))
-                {
-                    var rest = t.Substring(key.Length).Trim();
-                    double val;
-                    if (double.TryParse(rest, out val))
-                        return val;
-                }
-            }
-            return double.NaN;
+            return $"x-space cut added: {left} ≤ {rhs:0.###}";
         }
     }
 }
