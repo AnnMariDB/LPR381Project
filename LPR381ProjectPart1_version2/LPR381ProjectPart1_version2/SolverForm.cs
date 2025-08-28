@@ -90,6 +90,39 @@ namespace LPR381ProjectPart1_version2
         {
 
         }
+
+        private void btnRevisedPrimalSimplex_Click(object sender, EventArgs e)
+        {
+            try
+            {
+                currentProblem = LinearProblemParser.Parse(txtObjective.Text, txtConstraints.Lines);
+                txtCanonical.Text = currentProblem.ToCanonicalForm();
+
+                int m = currentProblem.Constraints.Count;
+                int n = currentProblem.ObjectiveCoeffs.Count;
+
+                double[,] A_aug = new double[m, n + m];
+                for (int i = 0; i < m; i++)
+                {
+                    for (int j = 0; j < n; j++)
+                        A_aug[i, j] = currentProblem.Constraints[i][j];
+                    A_aug[i, n + i] = 1.0;
+                }
+
+                double[] b = currentProblem.RHS.ToArray();
+                double[] c = new double[n + m];
+                for (int j = 0; j < n; j++)
+                    c[j] = currentProblem.IsMaximization ? currentProblem.ObjectiveCoeffs[j]
+                                                         : -currentProblem.ObjectiveCoeffs[j];
+
+                RevisedSimplex solver = new RevisedSimplex(A_aug, b, c, currentProblem.IsMaximization, n);
+                txtResults.Text = solver.Solve();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Error in Revised Simplex: " + ex.Message);
+            }
+        }
     }
 }
 
