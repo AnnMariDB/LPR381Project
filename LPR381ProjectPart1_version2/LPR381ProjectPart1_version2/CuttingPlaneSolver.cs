@@ -6,21 +6,21 @@ using System.Text;
 namespace LPR381ProjectPart1_version2
 {
     /// <summary>
-    /// Cutting Plane using Gomory fractional cuts, with a Revised Simplex (PFI) core and price-out.
-    /// - Selects the most-fractional BASIC integer row (fractional RHS).
-    /// - Slack-space cut: α·s ≥ f, α = frac(row_i(B^{-1})) (handles negatives).
-    /// - Convert via s = b − A x ⇒ (αA)x ≤ αb − f.
-    /// - Before adding: verifies the cut violates the current solution and is not a duplicate.
-    /// - Warm-starts PFI and repeats until integer or no eligible row.
+    /// Cutting Plane with Gomory fractional cuts (slides) + opportunistic 0–1 knapsack cover cuts
+    /// when the Gomory candidate is weak or duplicate. Uses RevisedSimplexPFI with price-out and
+    /// dual-simplex fallback, warm-starting between cuts.
     /// </summary>
     public class CuttingPlaneSolver
     {
         private readonly LinearProblem problem;
-        private const int DefaultMaxCuts = 25;
+        private readonly int maxCuts;
 
-        public CuttingPlaneSolver(LinearProblem problem)
+        private const double EPS = 1e-9;
+
+        public CuttingPlaneSolver(LinearProblem problem, int maxCuts = 25)
         {
             this.problem = problem;
+            this.maxCuts = Math.Max(1, maxCuts);
         }
 
         public string Solve(out double[] bestX, out double bestZ)
@@ -33,33 +33,32 @@ namespace LPR381ProjectPart1_version2
 
             sb.AppendLine("=== Cutting Plane (Gomory Fractional) with PFI + Price-Out ===");
 
-            // IMPORTANT: Create ONE PFI and REUSE IT (do NOT re-create inside the loop)
+            // Reuse one PFI instance across all cuts
             var pfi = new RevisedSimplexPFI(problem);
 
-            // Initial solve
+            // Initial LP relaxation
             sb.AppendLine("---- PFI: Initial LP relaxation ----");
             {
                 var pfiLog = pfi.Optimize(out var x0, out var z0);
                 sb.AppendLine(pfiLog);
                 if (AllFlaggedIntegersIntegral(x0, isInt))
                 {
-                    bestX = x0;
-                    bestZ = z0;
-                    sb.AppendLine("Already integer on flagged variables.");
+                    bestX = x0; bestZ = z0;
+                    sb.AppendLine("Already integer on flagged variables. Done.");
                     return sb.ToString();
                 }
             }
 
             int cuts = 0;
-            while (cuts < DefaultMaxCuts)
+            while (cuts < maxCuts)
             {
-                // Current basic values and basis (NO extra solve here)
+                // current basis state without re-solving
                 var xb = pfi.ComputeXB();
                 int m = pfi.Rows;
                 int n = pfi.Cols;
                 int[] Bidx = pfi.Basis;
 
-                // Build current x for original vars
+                // current x for ORIGINAL vars
                 double[] xCurr = new double[n];
                 for (int i = 0; i < m; i++)
                 {
@@ -67,11 +66,11 @@ namespace LPR381ProjectPart1_version2
                     if (col < n) xCurr[col] = xb[i];
                 }
 
-                // Most-fractional BASIC integer row
+                // --- choose BASIC integer row with largest fractional RHS
                 int chosenRow = -1;
                 double f = 0.0;
                 string basicName = "";
-                double bestScore = -1.0; // closeness to 0.5
+                double largestFrac = 0.0;
 
                 for (int i = 0; i < m; i++)
                 {
@@ -80,78 +79,88 @@ namespace LPR381ProjectPart1_version2
                     {
                         double bi = xb[i];
                         double fi = Frac(bi);
-                        if (fi > 1e-8 && fi < 1 - 1e-8)
+                        if (fi > largestFrac + 1e-10 && fi > 1e-8 && fi < 1 - 1e-8)
                         {
-                            double score = 0.5 - Math.Abs(fi - 0.5);
-                            if (score > bestScore)
-                            {
-                                bestScore = score;
-                                chosenRow = i; f = fi; basicName = $"x{col + 1}";
-                            }
+                            largestFrac = fi;
+                            chosenRow = i;
+                            f = fi;
+                            basicName = $"x{col + 1}";
                         }
                     }
                 }
 
+                // If no eligible fractional BASIC integer rows: try cover cut once, then stop
                 if (chosenRow < 0)
                 {
-                    sb.AppendLine("No eligible fractional basic-integer row found. Stopping.");
+                    if (TryAddCoverCutIfUseful(sb, problem, isInt, xCurr, pfi, ref cuts))
+                        continue;
+
+                    sb.AppendLine("No eligible fractional BASIC integer row found. Stopping.");
                     break;
                 }
 
                 // α = frac(row_i(B^{-1})) via B^{-T} e_i
-                var alphaRow = pfi.GetBinvRow(chosenRow);
-                for (int j = 0; j < alphaRow.Length; j++)
-                {
-                    double v = alphaRow[j];
-                    double fr = v - Math.Floor(v);
-                    if (fr < 0) fr += 1.0;
-                    alphaRow[j] = fr;
-                }
+                var alpha = pfi.GetBinvRow(chosenRow);
+                for (int j = 0; j < alpha.Length; j++) alpha[j] = Frac(alpha[j]);
 
                 // Convert α·s ≥ f with s = b − A x  =>  (αA)x ≤ αb − f
                 var A = problem.Constraints;
                 var b = problem.RHS;
 
-                double[] aCut = new double[n];     // (αA)
+                double[] aCut = new double[n]; // αA
                 for (int j = 0; j < n; j++)
                 {
                     double sum = 0.0;
-                    for (int r = 0; r < m; r++) sum += alphaRow[r] * A[r][j];
-                    aCut[j] = sum;
+                    for (int r = 0; r < m; r++) sum += alpha[r] * A[r][j];
+                    aCut[j] = ClipTiny(sum);
                 }
 
-                double rhs = 0.0;                  // αb − f
-                for (int r = 0; r < m; r++) rhs += alphaRow[r] * b[r];
+                double rhs = 0.0; // αb − f
+                for (int r = 0; r < m; r++) rhs += alpha[r] * b[r];
                 rhs -= f;
+                rhs = ClipTiny(rhs);
 
-                // Violation check (NO solve): must be strictly violated at xCurr
-                double lhs = 0.0;
-                for (int j = 0; j < n; j++) lhs += aCut[j] * xCurr[j];
+                // Skip zero-ish rows
+                if (aCut.All(v => Math.Abs(v) < 1e-12))
+                {
+                    // Try a stronger knapsack cover cut before giving up
+                    if (TryAddCoverCutIfUseful(sb, problem, isInt, xCurr, pfi, ref cuts))
+                        continue;
 
+                    sb.AppendLine("Candidate Gomory cut ~0; stopping.");
+                    break;
+                }
+
+                // Must be violated at current x
+                double lhs = 0.0; for (int j = 0; j < n; j++) lhs += aCut[j] * xCurr[j];
                 if (lhs <= rhs + 1e-8)
                 {
-                    sb.AppendLine();
-                    sb.AppendLine($"Candidate cut from row C{chosenRow + 1} does not violate current solution (lhs={lhs:0.###} ≤ rhs={rhs:0.###}).");
-                    sb.AppendLine("Stopping to avoid adding a non-cutting constraint.");
+                    // Try a stronger knapsack cover cut before giving up
+                    if (TryAddCoverCutIfUseful(sb, problem, isInt, xCurr, pfi, ref cuts))
+                        continue;
+
+                    sb.AppendLine($"Gomory candidate not violated (lhs={lhs:0.###} ≤ rhs={rhs:0.###}). Stopping.");
                     break;
                 }
 
                 // Duplicate guard
-                if (IsDuplicate(problem.Constraints, problem.RHS, aCut, rhs))
+                if (IsDuplicate(A, b, aCut, rhs))
                 {
-                    sb.AppendLine();
-                    sb.AppendLine("New cut duplicates an existing row → stopping.");
+                    // Try a stronger knapsack cover cut before giving up
+                    if (TryAddCoverCutIfUseful(sb, problem, isInt, xCurr, pfi, ref cuts))
+                        continue;
+
+                    sb.AppendLine("New Gomory cut duplicates an existing row → stopping.");
                     break;
                 }
 
-                // Log both forms
+                // Log and add
                 cuts++;
                 sb.AppendLine();
-                sb.AppendLine($"--- Gomory Cut #{cuts} from row C{chosenRow + 1} (basic {basicName}) ---");
-                sb.AppendLine(RenderSlackCut(alphaRow, f));
+                sb.AppendLine($"--- Gomory Cut #{cuts} from row C{chosenRow + 1} (basic {basicName}, f={f:0.###}) ---");
+                sb.AppendLine(RenderSlackCut(alpha, f));
                 sb.AppendLine(RenderXCut(aCut, rhs));
 
-                // ADD CUT, then WARM-START, then OPTIMIZE  (this order matters!)
                 problem.Constraints.Add(aCut.ToList());
                 problem.RHS.Add(rhs);
                 pfi.AddRowAndWarmStart(aCut, rhs);
@@ -162,8 +171,7 @@ namespace LPR381ProjectPart1_version2
 
                 if (AllFlaggedIntegersIntegral(xk, isInt))
                 {
-                    bestX = xk;
-                    bestZ = zk;
+                    bestX = xk; bestZ = zk;
                     sb.AppendLine("All flagged integer variables integral. Done.");
                     return sb.ToString();
                 }
@@ -173,15 +181,95 @@ namespace LPR381ProjectPart1_version2
             {
                 var pfiLog = pfi.Optimize(out var xend, out var zend);
                 sb.AppendLine(pfiLog);
-                bestX = xend;
-                bestZ = zend;
+                bestX = xend; bestZ = zend;
                 sb.AppendLine($"Stopped after {cuts} cut(s). Returning current solution (may be fractional).");
             }
 
             return sb.ToString();
         }
 
-        // ---------------- helpers ----------------
+        // ---------- Knapsack cover cut helper ----------
+
+        /// <summary>
+        /// If model looks like 0–1 knapsack (nonnegative row, binary flags) and current relaxation violates
+        /// a simple minimal cover inequality, add it and reoptimize (warm-start). Returns true if a cut was added.
+        /// </summary>
+        private static bool TryAddCoverCutIfUseful(
+            StringBuilder sb,
+            LinearProblem problem,
+            List<bool> isInt,
+            double[] xCurr,
+            RevisedSimplexPFI pfi,
+            ref int cutsCounter)
+        {
+            // Binary variables?
+            if (isInt.Count == 0 || !isInt.Any(v => v)) return false;
+
+            int n = problem.ObjectiveCoeffs.Count;
+            int mCons = problem.Constraints.Count;
+            if (mCons == 0) return false;
+
+            // Find a ≤ row with nonnegative coefficients (knapsack-like)
+            int row = -1;
+            for (int i = 0; i < mCons; i++)
+            {
+                if (problem.Constraints[i].Count < n) continue;
+                if (problem.Constraints[i].Any(c => c < -1e-12)) continue; // require nonnegativity
+                row = i; break;
+            }
+            if (row < 0) return false;
+
+            var w = problem.Constraints[row].Take(n).ToArray(); // weights
+            double B = problem.RHS[row];
+
+            // Greedy minimal cover: pick heaviest items until sum > B
+            var idx = Enumerable.Range(0, n)
+                                .Where(j => isInt[j]) // only integer vars
+                                .OrderByDescending(j => w[j])
+                                .ToList();
+
+            var cover = new List<int>();
+            double sum = 0.0;
+            foreach (var j in idx)
+            {
+                cover.Add(j);
+                sum += w[j];
+                if (sum > B + 1e-12) break;
+            }
+
+            if (sum <= B + 1e-12 || cover.Count == 0) return false;
+
+            // Build cover cut: sum_{j in C} x_j ≤ |C| - 1
+            double[] aCut = new double[n];
+            foreach (var j in cover) aCut[j] = 1.0;
+            double rhs = cover.Count - 1;
+
+            // Check violation at current x
+            double lhs = cover.Sum(j => xCurr[j]);
+            if (lhs <= rhs + 1e-8) return false; // not violated ⇒ skip
+
+            // Duplicate guard
+            if (IsDuplicate(problem.Constraints, problem.RHS, aCut, rhs)) return false;
+
+            cutsCounter++;
+            sb.AppendLine();
+            sb.AppendLine($"--- Knapsack Cover Cut #{cutsCounter} (row C{row + 1}) ---");
+            sb.AppendLine("Inequality: " +
+                          string.Join(" + ", cover.Select(j => $"x{j + 1}")) +
+                          $" ≤ {rhs}");
+
+            problem.Constraints.Add(aCut.ToList());
+            problem.RHS.Add(rhs);
+            pfi.AddRowAndWarmStart(aCut, rhs);
+
+            sb.AppendLine($"---- PFI: After cover cut #{cutsCounter} ----");
+            var pfiLog = pfi.Optimize(out var xk, out var zk);
+            sb.AppendLine(pfiLog);
+
+            return true;
+        }
+
+        // ---------------- helpers (unchanged-ish) ----------------
 
         private static List<bool> BuildIntegralMask(LinearProblem p)
         {
@@ -216,7 +304,7 @@ namespace LPR381ProjectPart1_version2
                 bool same = true;
                 for (int j = 0; j < aNew.Length; j++)
                 {
-                    if (Math.Abs(A[i][j] - aNew[j]) > tol) { same = false; break; }
+                    if (j >= A[i].Count || Math.Abs(A[i][j] - aNew[j]) > tol) { same = false; break; }
                 }
                 if (same) return true;
             }
@@ -227,27 +315,26 @@ namespace LPR381ProjectPart1_version2
         {
             double f = v - Math.Floor(v);
             if (f < 0) f += 1.0;
+            if (f < 1e-12) f = 0.0;
+            if (f > 1.0 - 1e-12) f = 0.0;
             return f;
         }
 
+        private static double ClipTiny(double x) => Math.Abs(x) < 1e-12 ? 0.0 : x;
+
         private static string RenderSlackCut(double[] alpha, double f)
         {
-            // α·s ≥ f   (equivalently  −α·s ≤ −f)
-            string Join(double sign = +1.0)
+            var partsPos = new List<string>();
+            var partsNeg = new List<string>();
+            for (int j = 0; j < alpha.Length; j++)
             {
-                var parts = new List<string>();
-                for (int j = 0; j < alpha.Length; j++)
-                {
-                    double c = sign * alpha[j];
-                    if (Math.Abs(c) < 1e-12) continue;
-                    string term = $"{Math.Abs(c):0.###}s{j + 1}";
-                    parts.Add(c >= 0 ? term : "− " + term);
-                }
-                if (parts.Count == 0) return "0";
-                return parts[0] + string.Concat(parts.Skip(1).Select(p => " + " + p));
+                double c = alpha[j];
+                if (Math.Abs(c) < 1e-12) continue;
+                partsPos.Add($"{c:0.###}s{j + 1}");
+                partsNeg.Add($"{(-c):0.###}s{j + 1}");
             }
-            var ge = Join(+1);
-            var le = Join(-1);
+            string ge = partsPos.Count == 0 ? "0" : string.Join(" + ", partsPos);
+            string le = partsNeg.Count == 0 ? "0" : string.Join(" + ", partsNeg);
             return $"Slack-space cut:   {ge} ≥ {f:0.###}   (equivalently  {le} ≤ {(-f):0.###})";
         }
 

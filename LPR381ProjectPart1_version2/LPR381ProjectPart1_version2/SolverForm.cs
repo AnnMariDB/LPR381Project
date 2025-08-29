@@ -116,9 +116,18 @@ namespace LPR381ProjectPart1_version2
                 var sb = new StringBuilder();
                 sb.AppendLine("=== Cutting Plane (Gomory) ===");
                 sb.AppendLine(log);
+
+                // Decide label based on near-integrality if there's a "bin" line
+                bool looksBinary = string.Join("\n", txtConstraints.Lines)
+                                     .ToLower().Contains("bin");
+
+                bool IsNearlyInteger(double v) => Math.Abs(v - Math.Round(v)) <= 1e-6;
+
                 if (x != null && x.Length > 0)
                 {
-                    sb.AppendLine("\nCurrent integer solution:");
+                    bool allInt = !looksBinary || x.All(IsNearlyInteger);
+
+                    sb.AppendLine(allInt ? "\nInteger solution:" : "\nCurrent relaxation (may be fractional):");
                     for (int i = 0; i < x.Length; i++)
                         sb.AppendLine($"x{i + 1} = {x[i]:0.###}");
                     sb.AppendLine($"z = {z:0.###}");
@@ -126,6 +135,7 @@ namespace LPR381ProjectPart1_version2
 
                 txtResults.Text = sb.ToString();
             }
+
             catch (Exception ex)
             {
                 MessageBox.Show("Error: " + ex.Message);
