@@ -46,6 +46,7 @@
     <Reference Include="System.Xml" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="KnapsackSolver.cs" />
     <Compile Include="LinearProblem.cs" />
     <Compile Include="LinearProblemParser.cs" />
     <Compile Include="RevisedSimplex.cs" />

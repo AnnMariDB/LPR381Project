@@ -123,6 +123,24 @@ namespace LPR381ProjectPart1_version2
                 MessageBox.Show("Error in Revised Simplex: " + ex.Message);
             }
         }
+
+        private void btnBranchandBoundKnapsack_Click(object sender, EventArgs e)
+        {
+            try
+            {
+                currentProblem = LinearProblemParser.Parse(txtObjective.Text, txtConstraints.Lines);
+                txtCanonical.Text = currentProblem.ToCanonicalForm();
+
+                KnapsackSolver ks = new KnapsackSolver(currentProblem);
+                string result = ks.Solve();
+
+                txtResults.Text = result;
+            }
+            catch (Exception ex) 
+            {
+                MessageBox.Show("Error: " + ex.Message);
+            }
+        }
     }
 }
 
