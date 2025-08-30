@@ -18,6 +18,7 @@ namespace LPR381ProjectPart1_version2
         {
             InitializeComponent();
         }
+        private RevisedSimplex revisedSimplex;
 
         private void SolverForm_Load(object sender, EventArgs e)
         {
@@ -115,12 +116,30 @@ namespace LPR381ProjectPart1_version2
                     c[j] = currentProblem.IsMaximization ? currentProblem.ObjectiveCoeffs[j]
                                                          : -currentProblem.ObjectiveCoeffs[j];
 
-                RevisedSimplex solver = new RevisedSimplex(A_aug, b, c, currentProblem.IsMaximization, n);
-                txtResults.Text = solver.Solve();
+                revisedSimplex = new RevisedSimplex(A_aug, b, c, currentProblem.IsMaximization, n);
+                txtResults.Text = revisedSimplex.Solve();
             }
             catch (Exception ex)
             {
                 MessageBox.Show("Error in Revised Simplex: " + ex.Message);
+            }
+        }
+
+        private void btnGoToSensitivityAnalysis_Click(object sender, EventArgs e)
+        {
+            if (revisedSimplex == null || revisedSimplex.LastState == null || !revisedSimplex.LastState.IsOptimal)
+            {
+                MessageBox.Show("Please run the Revised Primal Simplex to optimality first.",
+                                "Sensitivity Analysis",
+                                MessageBoxButtons.OK,
+                                MessageBoxIcon.Warning);
+                return;
+            }
+
+            using (var f = new SensAnalysisForm(revisedSimplex.LastState))
+            {
+                f.StartPosition = FormStartPosition.CenterParent;
+                f.ShowDialog(this);
             }
         }
     }

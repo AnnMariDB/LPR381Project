@@ -49,6 +49,10 @@
     <Compile Include="LinearProblem.cs" />
     <Compile Include="LinearProblemParser.cs" />
     <Compile Include="RevisedSimplex.cs" />
+    <Compile Include="RevisedSimplexState.cs" />
+    <Compile Include="SensAnalysisForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="SimplexSolver.cs" />
     <Compile Include="SolverForm.cs">
       <SubType>Form</SubType>

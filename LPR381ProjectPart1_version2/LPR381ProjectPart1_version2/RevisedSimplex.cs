@@ -20,6 +20,7 @@ namespace LPR381ProjectPart1_version2
         private List<int> nonBasis;       // indices of non-basic columns
 
         private const double EPS = 1e-9;
+        public RevisedSimplexState LastState { get; private set; }
 
         public RevisedSimplex(double[,] A_aug, double[] b, double[] cMax, bool isMax, int nOriginal)
         {
@@ -153,6 +154,14 @@ namespace LPR381ProjectPart1_version2
         {
             var sb = new StringBuilder();
             sb.AppendLine("=== Revised Primal Simplex Method ===");
+            
+            
+            // Infeasibility check at initialization
+            if (b.Any(val => val < -EPS))
+            {
+                sb.AppendLine("Infeasible problem (initial RHS has negative values).");
+                return sb.ToString();
+            }
 
             int iteration = 0;
             while (true)
@@ -243,6 +252,32 @@ namespace LPR381ProjectPart1_version2
                         sb.AppendLine($"{VarName(j, nVars)} = {FormatNumber(x[j])}");
 
                     sb.AppendLine($"Optimal Z = {FormatNumber(zOriginal)}");
+                    var reducedStdAll = new double[nVars + mCons];
+                    for (int jcol = 0; jcol < nVars + mCons; jcol++)
+                    {
+                        double yDotA = 0.0;
+                        for (int i = 0; i < mCons; i++) yDotA += yT[i] * A[i, jcol];
+                        reducedStdAll[jcol] = c[jcol] - yDotA;  // standard sign
+                    }
+
+                    // Save a full snapshot for the Sensitivity form
+                    this.LastState = new RevisedSimplexState
+                    {
+                        IsOptimal = true,
+                        OriginalIsMax = originalIsMax,
+                        A = A,
+                        b = b,
+                        c = c,
+                        nVars = nVars,
+                        mCons = mCons,
+                        Basis = basis.ToArray(),
+                        NonBasis = nonBasis.ToArray(),
+                        BInv = B_inv,
+                        xB = xB,
+                        y = yT,                         // shadow prices y^T = c_B^T B^{-1}
+                        ReducedCostsStd = reducedStdAll, // r_std = c - yA
+                        ZOriginal = zOriginal
+                    };
                     break;
                 }
 

@@ -202,6 +202,7 @@ namespace LPR381ProjectPart1_version2
             this.btnGoToSensitivityAnalysis.TabIndex = 12;
             this.btnGoToSensitivityAnalysis.Text = "Go To Sensitivity Analysis";
             this.btnGoToSensitivityAnalysis.UseVisualStyleBackColor = false;
+            this.btnGoToSensitivityAnalysis.Click += new System.EventHandler(this.btnGoToSensitivityAnalysis_Click);
             // 
             // pnlBtnBack
             // 
@@ -217,7 +218,7 @@ namespace LPR381ProjectPart1_version2
             this.pnlBtnBack.Controls.Add(this.btnRunSimplex);
             this.pnlBtnBack.Controls.Add(this.btnSaveResults);
             this.pnlBtnBack.Location = new System.Drawing.Point(724, 12);
-            this.pnlBtnBack.Margin = new System.Windows.Forms.Padding(4, 4, 4, 4);
+            this.pnlBtnBack.Margin = new System.Windows.Forms.Padding(4);
             this.pnlBtnBack.Name = "pnlBtnBack";
             this.pnlBtnBack.Size = new System.Drawing.Size(308, 549);
             this.pnlBtnBack.TabIndex = 13;
