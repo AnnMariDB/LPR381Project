@@ -190,6 +190,7 @@ namespace LPR381ProjectPart1_version2
             this.btnBranchandBoundKnapsack.TabIndex = 11;
             this.btnBranchandBoundKnapsack.Text = "Knapsack (Branch and Bound) ";
             this.btnBranchandBoundKnapsack.UseVisualStyleBackColor = false;
+            this.btnBranchandBoundKnapsack.Click += new System.EventHandler(this.btnBranchandBoundKnapsack_Click);
             // 
             // btnGoToSensitivityAnalysis
             // 
